@@ -321,3 +321,108 @@
   )
 )
 
+
+;; Emergency resource recovery
+(define-constant ERR_EMERGENCY_NOT_APPROVED (err u209))
+(define-map EmergencyRecoveryRequests
+  { allocation-id: uint }
+  { 
+    admin-approved: bool,
+    initiator-approved: bool,
+    reason: (string-ascii 100)
+  }
+)
+
+(define-public (emergency-resource-recovery (allocation-id uint) (reason (string-ascii 100)))
+  (begin
+    (asserts! (is-valid-allocation-id allocation-id) ERR_INVALID_ALLOCATION_ID)
+    (let
+      (
+        (allocation (unwrap! (map-get? ImpactAllocations { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+        (initiator (get initiator allocation))
+        (resource-amount (get total-resource allocation))
+        (approved-count (get approved-stage-count allocation))
+        (remaining-resource (- resource-amount (* (/ resource-amount (len (get milestone-stages allocation))) approved-count)))
+        (emergency-request (default-to 
+                            { admin-approved: false, initiator-approved: false, reason: reason }
+                            (map-get? EmergencyRecoveryRequests { allocation-id: allocation-id })))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_ADMIN) (is-eq tx-sender initiator)) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq (get status allocation) "refunded")) ERR_FUNDS_RELEASED)
+      (asserts! (not (is-eq (get status allocation) "recovered")) ERR_FUNDS_RELEASED)
+
+      (if (is-eq tx-sender PROTOCOL_ADMIN)
+        (map-set EmergencyRecoveryRequests
+          { allocation-id: allocation-id }
+          (merge emergency-request { admin-approved: true, reason: reason })
+        )
+        (map-set EmergencyRecoveryRequests
+          { allocation-id: allocation-id }
+          (merge emergency-request { initiator-approved: true, reason: reason })
+        )
+      )
+
+      (let
+        (
+          (updated-request (unwrap! (map-get? EmergencyRecoveryRequests { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+        )
+        (if (and (get admin-approved updated-request) (get initiator-approved updated-request))
+          (match (stx-transfer? remaining-resource (as-contract tx-sender) initiator)
+            success
+              (begin
+                (map-set ImpactAllocations
+                  { allocation-id: allocation-id }
+                  (merge allocation { status: "recovered" })
+                )
+                (ok true)
+              )
+            error ERR_TRANSFER_FAILED
+          )
+          (ok false)
+        )
+      )
+    )
+  )
+)
+
+;; Milestone progress tracking
+(define-constant ERR_PROGRESS_ALREADY_REPORTED (err u210))
+(define-map MilestoneProgress
+  { allocation-id: uint, milestone-index: uint }
+  {
+    progress-percentage: uint,
+    details: (string-ascii 200),
+    reported-at: uint,
+    evidence-hash: (buff 32)
+  }
+)
+
+(define-public (report-milestone-progress 
+                (allocation-id uint) 
+                (milestone-index uint) 
+                (progress-percentage uint) 
+                (details (string-ascii 200))
+                (evidence-hash (buff 32)))
+  (begin
+    (asserts! (is-valid-allocation-id allocation-id) ERR_INVALID_ALLOCATION_ID)
+    (asserts! (<= progress-percentage u100) ERR_INVALID_AMOUNT)
+    (let
+      (
+        (allocation (unwrap! (map-get? ImpactAllocations { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+        (milestone-stages (get milestone-stages allocation))
+        (recipient (get recipient allocation))
+      )
+      (asserts! (is-eq tx-sender recipient) ERR_UNAUTHORIZED)
+      (asserts! (< milestone-index (len milestone-stages)) ERR_INVALID_MILESTONE_CONFIG)
+      (asserts! (not (is-eq (get status allocation) "refunded")) ERR_FUNDS_RELEASED)
+      (asserts! (< block-height (get expiration-block allocation)) ERR_ALLOCATION_EXPIRED)
+
+      (match (map-get? MilestoneProgress { allocation-id: allocation-id, milestone-index: milestone-index })
+        prev-progress (asserts! (< (get progress-percentage prev-progress) u100) ERR_PROGRESS_ALREADY_REPORTED)
+        true
+      )
+      (ok true)
+    )
+  )
+)
+
