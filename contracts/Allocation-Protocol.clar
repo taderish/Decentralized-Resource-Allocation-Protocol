@@ -176,3 +176,71 @@
   }
 )
 
+;; Donation Challenge Mechanism
+(define-constant ERR_CHALLENGE_ALREADY_EXISTS (err u236))
+(define-constant ERR_CHALLENGE_PERIOD_EXPIRED (err u237))
+(define-constant CHALLENGE_PERIOD_BLOCKS u1008)
+(define-constant CHALLENGE_BOND u1000000)
+
+(define-map AllocationChallenges
+  { allocation-id: uint }
+  {
+    challenger: principal,
+    challenge-reason: (string-ascii 200),
+    challenge-bond: uint,
+    resolved: bool,
+    valid-challenge: bool,
+    challenge-block: uint
+  }
+)
+
+(define-public (submit-allocation-challenge 
+                (allocation-id uint)
+                (challenge-reason (string-ascii 200)))
+  (begin
+    (asserts! (is-valid-allocation-id allocation-id) ERR_INVALID_ALLOCATION_ID)
+    (let
+      (
+        (allocation (unwrap! (map-get? ImpactAllocations { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+      )
+      (match (map-get? AllocationChallenges { allocation-id: allocation-id })
+        existing-challenge (asserts! false ERR_CHALLENGE_ALREADY_EXISTS)
+        true
+      )
+
+      (match (stx-transfer? CHALLENGE_BOND tx-sender (as-contract tx-sender))
+        success
+            (ok true)
+        error ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+(define-public (resolve-allocation-challenge (allocation-id uint) (is-valid bool))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERR_UNAUTHORIZED)
+    (let
+      (
+        (challenge (unwrap! 
+          (map-get? AllocationChallenges { allocation-id: allocation-id }) 
+          ERR_ALLOCATION_NOT_FOUND))
+        (challenge-block (get challenge-block challenge))
+      )
+      (asserts! (not (get resolved challenge)) ERR_UNAUTHORIZED)
+      (asserts! (< (- block-height challenge-block) CHALLENGE_PERIOD_BLOCKS) ERR_CHALLENGE_PERIOD_EXPIRED)
+
+      (if is-valid
+        (match (stx-transfer? (get challenge-bond challenge) (as-contract tx-sender) (get challenger challenge))
+          success (ok true)
+          error ERR_TRANSFER_FAILED
+        )
+        (match (stx-transfer? (get challenge-bond challenge) (as-contract tx-sender) PROTOCOL_ADMIN)
+          success (ok true)
+          error ERR_TRANSFER_FAILED
+        )
+      )
+    )
+  )
+)
+
