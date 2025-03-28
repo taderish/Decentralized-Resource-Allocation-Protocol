@@ -538,6 +538,67 @@
   )
 )
 
+(define-public (rate-limited-impact-allocation (recipient principal) (resource-amount uint) (milestone-stages (list 5 uint)))
+  (let
+    (
+      (initiator-activity (default-to 
+                        { last-allocation-block: u0, allocations-in-window: u0 }
+                        (map-get? InitiatorActivityTracker { initiator: tx-sender })))
+      (last-block (get last-allocation-block initiator-activity))
+      (window-count (get allocations-in-window initiator-activity))
+      (is-new-window (> (- block-height last-block) RATE_LIMIT_WINDOW))
+      (updated-count (if is-new-window u1 (+ window-count u1)))
+    )
+    (asserts! (or is-new-window (< window-count MAX_ALLOCATIONS_PER_WINDOW)) ERR_RATE_LIMIT_EXCEEDED)
+
+    (map-set InitiatorActivityTracker
+      { initiator: tx-sender }
+      {
+        last-allocation-block: block-height,
+        allocations-in-window: updated-count
+      }
+    )
+
+    (secure-launch-impact-allocation recipient resource-amount milestone-stages)
+  )
+)
+
+;; Fraud detection mechanism
+(define-constant ERR_SUSPICIOUS_ACTIVITY (err u215))
+(define-constant SUSPICIOUS_AMOUNT_THRESHOLD u1000000000)
+(define-constant SUSPICIOUS_RATE_THRESHOLD u3)
+
+(define-map SuspiciousAllocations
+  { allocation-id: uint }
+  { 
+    reason: (string-ascii 20),
+    flagged-by: principal,
+    resolved: bool
+  }
+)
+
+(define-public (flag-suspicious-allocation (allocation-id uint) (reason (string-ascii 20)))
+  (begin
+    (asserts! (is-valid-allocation-id allocation-id) ERR_INVALID_ALLOCATION_ID)
+
+    (let
+      (
+        (allocation (unwrap! (map-get? ImpactAllocations { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+        (recipient (get recipient allocation))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_ADMIN) (is-eq tx-sender recipient)) ERR_UNAUTHORIZED)
+
+      (map-set ImpactAllocations
+        { allocation-id: allocation-id }
+        (merge allocation { status: "flagged" })
+      )
+
+      (ok true)
+    )
+  )
+)
+
+
 
 
 
