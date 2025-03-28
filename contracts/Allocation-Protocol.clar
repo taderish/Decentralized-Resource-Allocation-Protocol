@@ -599,7 +599,60 @@
 )
 
 
+;; Allocation control delegation
+(define-constant ERR_ALREADY_DELEGATED (err u211))
+(define-map AllocationDelegates
+  { allocation-id: uint }
+  {
+    delegate: principal,
+    can-cancel: bool,
+    can-extend: bool,
+    can-increase: bool,
+    delegation-expiry: uint
+  }
+)
 
+(define-public (delegate-allocation-control 
+                (allocation-id uint) 
+                (delegate principal) 
+                (can-cancel bool)
+                (can-extend bool)
+                (can-increase bool)
+                (delegation-duration uint))
+  (begin
+    (asserts! (is-valid-allocation-id allocation-id) ERR_INVALID_ALLOCATION_ID)
+    (asserts! (> delegation-duration u0) ERR_INVALID_AMOUNT)
+    (let
+      (
+        (allocation (unwrap! (map-get? ImpactAllocations { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+        (initiator (get initiator allocation))
+        (delegation-expiry (+ block-height delegation-duration))
+      )
+      (asserts! (is-eq tx-sender initiator) ERR_UNAUTHORIZED)
+      (asserts! (< block-height (get expiration-block allocation)) ERR_ALLOCATION_EXPIRED)
+      (asserts! (not (is-eq (get status allocation) "refunded")) ERR_FUNDS_RELEASED)
 
+      (match (map-get? AllocationDelegates { allocation-id: allocation-id })
+        existing-delegation (asserts! (< block-height (get delegation-expiry existing-delegation)) ERR_ALREADY_DELEGATED)
+        true
+      )
+      (ok true)
+    )
+  )
+)
 
+;; Batch milestone validation
+(define-constant ERR_BATCH_OPERATION_FAILED (err u212))
+
+(define-public (batch-validate-allocation-stages (allocation-ids (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERR_UNAUTHORIZED)
+    (let
+      (
+        (result (fold validate-stage-fold allocation-ids (ok true)))
+      )
+      result
+    )
+  )
+)
 
