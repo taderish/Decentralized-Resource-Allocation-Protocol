@@ -244,3 +244,80 @@
   )
 )
 
+(define-private (get-recipient-percentage (recipient { target: principal, allocation-percentage: uint }))
+  (get allocation-percentage recipient)
+)
+
+;; Admin control interface
+(define-data-var protocol-paused bool false)
+
+(define-public (set-protocol-pause-state (new-state bool))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERR_UNAUTHORIZED)
+    (ok new-state)
+  )
+)
+
+;; Recipient whitelist management
+(define-map ApprovedRecipients
+  { recipient: principal }
+  { approved: bool }
+)
+
+(define-read-only (is-recipient-approved (recipient principal))
+  (default-to false (get approved (map-get? ApprovedRecipients { recipient: recipient })))
+)
+
+;; Allocation expiration extension
+(define-constant ERR_ALREADY_EXPIRED (err u208))
+(define-constant MAX_EXTENSION_BLOCKS u1008) ;; ~7 days extension window
+
+(define-public (extend-allocation-expiration (allocation-id uint) (extension-blocks uint))
+  (begin
+    (asserts! (is-valid-allocation-id allocation-id) ERR_INVALID_ALLOCATION_ID)
+    (asserts! (<= extension-blocks MAX_EXTENSION_BLOCKS) ERR_INVALID_AMOUNT)
+    (let
+      (
+        (allocation (unwrap! (map-get? ImpactAllocations { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+        (initiator (get initiator allocation))
+        (current-expiry (get expiration-block allocation))
+      )
+      (asserts! (is-eq tx-sender initiator) ERR_UNAUTHORIZED)
+      (asserts! (< block-height current-expiry) ERR_ALREADY_EXPIRED)
+      (map-set ImpactAllocations
+        { allocation-id: allocation-id }
+        (merge allocation { expiration-block: (+ current-expiry extension-blocks) })
+      )
+      (ok true)
+    )
+  )
+)
+
+;; Resource amount augmentation
+(define-public (increase-allocation-resource (allocation-id uint) (additional-resource uint))
+  (begin
+    (asserts! (is-valid-allocation-id allocation-id) ERR_INVALID_ALLOCATION_ID)
+    (asserts! (> additional-resource u0) ERR_INVALID_AMOUNT)
+    (let
+      (
+        (allocation (unwrap! (map-get? ImpactAllocations { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+        (initiator (get initiator allocation))
+        (current-resource (get total-resource allocation))
+      )
+      (asserts! (is-eq tx-sender initiator) ERR_UNAUTHORIZED)
+      (asserts! (< block-height (get expiration-block allocation)) ERR_ALLOCATION_EXPIRED)
+      (match (stx-transfer? additional-resource tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (map-set ImpactAllocations
+              { allocation-id: allocation-id }
+              (merge allocation { total-resource: (+ current-resource additional-resource) })
+            )
+            (ok true)
+          )
+        error ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
