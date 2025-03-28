@@ -478,5 +478,67 @@
   )
 )
 
+;; Circuit breaker protection mechanism
+(define-constant CIRCUIT_COOLDOWN u720) ;; ~5 days protection window
+(define-constant ERR_CIRCUIT_ACTIVE (err u222))
+(define-constant ERR_CIRCUIT_TRIGGER_COOLDOWN (err u223))
+
+;; Multi-recipient resource distribution
+(define-constant MAX_RECIPIENTS u5)
+(define-constant ERR_TOO_MANY_RECIPIENTS (err u224))
+(define-constant ERR_INVALID_DISTRIBUTION (err u225))
+
+(define-map SplitResourceAllocations
+  { split-allocation-id: uint }
+  {
+    initiator: principal,
+    recipients: (list 5 { target: principal, allocation-percentage: uint }),
+    total-resource: uint,
+    creation-block: uint,
+    status: (string-ascii 10)
+  }
+)
+
+(define-data-var latest-split-allocation-id uint u0)
+
+(define-public (create-split-resource-allocation (recipients (list 5 { target: principal, allocation-percentage: uint })) (resource-amount uint))
+  (begin
+    (asserts! (> resource-amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (> (len recipients) u0) ERR_INVALID_ALLOCATION_ID)
+    (asserts! (<= (len recipients) MAX_RECIPIENTS) ERR_TOO_MANY_RECIPIENTS)
+
+    (let
+      (
+        (total-percentage (fold + (map get-recipient-percentage recipients) u0))
+      )
+      (asserts! (is-eq total-percentage u100) ERR_INVALID_DISTRIBUTION)
+
+      (match (stx-transfer? resource-amount tx-sender (as-contract tx-sender))
+        success
+          (let
+            (
+              (allocation-id (+ (var-get latest-split-allocation-id) u1))
+            )
+            (map-set SplitResourceAllocations
+              { split-allocation-id: allocation-id }
+              {
+                initiator: tx-sender,
+                recipients: recipients,
+                total-resource: resource-amount,
+                creation-block: block-height,
+                status: "pending"
+              }
+            )
+            (var-set latest-split-allocation-id allocation-id)
+            (ok allocation-id)
+          )
+        error ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+
+
 
 
