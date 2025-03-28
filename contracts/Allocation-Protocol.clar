@@ -30,3 +30,217 @@
 
 (define-data-var latest-allocation-id uint u0)
 
+;; Primary allocation initialization
+(define-public (launch-impact-allocation (recipient principal) (resource-amount uint) (milestone-stages (list 5 uint)))
+  (let
+    (
+      (allocation-id (+ (var-get latest-allocation-id) u1))
+      (expiration-block (+ block-height ALLOCATION_DURATION))
+    )
+    (asserts! (> resource-amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (validate-recipient recipient) ERR_INVALID_MILESTONE_CONFIG)
+    (asserts! (> (len milestone-stages) u0) ERR_INVALID_MILESTONE_CONFIG)
+
+    (match (stx-transfer? resource-amount tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (map-set ImpactAllocations
+            { allocation-id: allocation-id }
+            {
+              initiator: tx-sender,
+              recipient: recipient,
+              total-resource: resource-amount,
+              status: "pending",
+              creation-block: block-height,
+              expiration-block: expiration-block,
+              milestone-stages: milestone-stages,
+              approved-stage-count: u0
+            }
+          )
+          (var-set latest-allocation-id allocation-id)
+          (ok allocation-id)
+        )
+      error ERR_TRANSFER_FAILED
+    )
+  )
+)
+
+(define-private (validate-recipient (recipient principal))
+  (not (is-eq recipient tx-sender))
+)
+
+(define-private (is-valid-allocation-id (allocation-id uint))
+  (<= allocation-id (var-get latest-allocation-id))
+)
+
+;; Stage validation and resource release
+(define-public (validate-allocation-stage (allocation-id uint))
+  (begin
+    (asserts! (is-valid-allocation-id allocation-id) ERR_INVALID_ALLOCATION_ID)
+    (let
+      (
+        (allocation (unwrap! (map-get? ImpactAllocations { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+        (milestone-stages (get milestone-stages allocation))
+        (approved-count (get approved-stage-count allocation))
+        (recipient (get recipient allocation))
+        (total-resource (get total-resource allocation))
+        (stage-resource-amount (/ total-resource (len milestone-stages)))
+      )
+      (asserts! (< approved-count (len milestone-stages)) ERR_FUNDS_RELEASED)
+      (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERR_UNAUTHORIZED)
+
+      (match (stx-transfer? stage-resource-amount (as-contract tx-sender) recipient)
+        success
+          (begin
+            (map-set ImpactAllocations
+              { allocation-id: allocation-id }
+              (merge allocation { approved-stage-count: (+ approved-count u1) })
+            )
+            (ok true)
+          )
+        error ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+;; Initiator refund mechanism
+(define-public (refund-initiator (allocation-id uint))
+  (begin
+    (asserts! (is-valid-allocation-id allocation-id) ERR_INVALID_ALLOCATION_ID)
+    (let
+      (
+        (allocation (unwrap! (map-get? ImpactAllocations { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+        (initiator (get initiator allocation))
+        (resource-amount (get total-resource allocation))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERR_UNAUTHORIZED)
+      (asserts! (> block-height (get expiration-block allocation)) ERR_ALLOCATION_EXPIRED)
+
+      (match (stx-transfer? resource-amount (as-contract tx-sender) initiator)
+        success
+          (begin
+            (map-set ImpactAllocations
+              { allocation-id: allocation-id }
+              (merge allocation { status: "refunded" })
+            )
+            (ok true)
+          )
+        error ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+;; Allocation termination by initiator
+(define-public (terminate-allocation (allocation-id uint))
+  (begin
+    (asserts! (is-valid-allocation-id allocation-id) ERR_INVALID_ALLOCATION_ID)
+    (let
+      (
+        (allocation (unwrap! (map-get? ImpactAllocations { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+        (initiator (get initiator allocation))
+        (resource-amount (get total-resource allocation))
+        (approved-count (get approved-stage-count allocation))
+        (remaining-resource (- resource-amount (* (/ resource-amount (len (get milestone-stages allocation))) approved-count)))
+      )
+      (asserts! (is-eq tx-sender initiator) ERR_UNAUTHORIZED)
+      (asserts! (< block-height (get expiration-block allocation)) ERR_ALLOCATION_EXPIRED)
+      (asserts! (is-eq (get status allocation) "pending") ERR_FUNDS_RELEASED)
+
+      (match (stx-transfer? remaining-resource (as-contract tx-sender) initiator)
+        success
+          (begin
+            (map-set ImpactAllocations
+              { allocation-id: allocation-id }
+              (merge allocation { status: "terminated" })
+            )
+            (ok true)
+          )
+        error ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+;; Rate limiting system
+(define-constant ERR_RATE_LIMIT_EXCEEDED (err u213))
+(define-constant RATE_LIMIT_WINDOW u144)
+(define-constant MAX_ALLOCATIONS_PER_WINDOW u5)
+
+(define-map InitiatorActivityTracker
+  { initiator: principal }
+  {
+    last-allocation-block: uint,
+    allocations-in-window: uint
+  }
+)
+
+;; Donation Challenge Mechanism
+(define-constant ERR_CHALLENGE_ALREADY_EXISTS (err u236))
+(define-constant ERR_CHALLENGE_PERIOD_EXPIRED (err u237))
+(define-constant CHALLENGE_PERIOD_BLOCKS u1008)
+(define-constant CHALLENGE_BOND u1000000)
+
+(define-map AllocationChallenges
+  { allocation-id: uint }
+  {
+    challenger: principal,
+    challenge-reason: (string-ascii 200),
+    challenge-bond: uint,
+    resolved: bool,
+    valid-challenge: bool,
+    challenge-block: uint
+  }
+)
+
+(define-public (submit-allocation-challenge 
+                (allocation-id uint)
+                (challenge-reason (string-ascii 200)))
+  (begin
+    (asserts! (is-valid-allocation-id allocation-id) ERR_INVALID_ALLOCATION_ID)
+    (let
+      (
+        (allocation (unwrap! (map-get? ImpactAllocations { allocation-id: allocation-id }) ERR_ALLOCATION_NOT_FOUND))
+      )
+      (match (map-get? AllocationChallenges { allocation-id: allocation-id })
+        existing-challenge (asserts! false ERR_CHALLENGE_ALREADY_EXISTS)
+        true
+      )
+
+      (match (stx-transfer? CHALLENGE_BOND tx-sender (as-contract tx-sender))
+        success
+            (ok true)
+        error ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+(define-public (resolve-allocation-challenge (allocation-id uint) (is-valid bool))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_ADMIN) ERR_UNAUTHORIZED)
+    (let
+      (
+        (challenge (unwrap! 
+          (map-get? AllocationChallenges { allocation-id: allocation-id }) 
+          ERR_ALLOCATION_NOT_FOUND))
+        (challenge-block (get challenge-block challenge))
+      )
+      (asserts! (not (get resolved challenge)) ERR_UNAUTHORIZED)
+      (asserts! (< (- block-height challenge-block) CHALLENGE_PERIOD_BLOCKS) ERR_CHALLENGE_PERIOD_EXPIRED)
+
+      (if is-valid
+        (match (stx-transfer? (get challenge-bond challenge) (as-contract tx-sender) (get challenger challenge))
+          success (ok true)
+          error ERR_TRANSFER_FAILED
+        )
+        (match (stx-transfer? (get challenge-bond challenge) (as-contract tx-sender) PROTOCOL_ADMIN)
+          success (ok true)
+          error ERR_TRANSFER_FAILED
+        )
+      )
+    )
+  )
+)
+
