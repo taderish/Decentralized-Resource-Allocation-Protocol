@@ -426,3 +426,57 @@
   )
 )
 
+(define-private (validate-stage-fold (allocation-id uint) (prev-result (response bool uint)))
+  (begin
+    (match prev-result
+      success
+        (match (validate-allocation-stage allocation-id)
+          inner-success (ok true)
+          inner-error (err inner-error)
+        )
+      error (err error)
+    )
+  )
+)
+
+;; Secure allocation initiation with recipient whitelist
+(define-public (secure-launch-impact-allocation (recipient principal) (resource-amount uint) (milestone-stages (list 5 uint)))
+  (begin
+    (asserts! (not (var-get protocol-paused)) ERR_UNAUTHORIZED)
+    (asserts! (is-recipient-approved recipient) ERR_UNAUTHORIZED)
+    (asserts! (> resource-amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (validate-recipient recipient) ERR_INVALID_MILESTONE_CONFIG)
+    (asserts! (> (len milestone-stages) u0) ERR_INVALID_MILESTONE_CONFIG)
+
+    (let
+      (
+        (allocation-id (+ (var-get latest-allocation-id) u1))
+        (expiration-block (+ block-height ALLOCATION_DURATION))
+      )
+      (match (stx-transfer? resource-amount tx-sender (as-contract tx-sender))
+        success
+          (begin
+            (map-set ImpactAllocations
+              { allocation-id: allocation-id }
+              {
+                initiator: tx-sender,
+                recipient: recipient,
+                total-resource: resource-amount,
+                status: "pending",
+                creation-block: block-height,
+                expiration-block: expiration-block,
+                milestone-stages: milestone-stages,
+                approved-stage-count: u0
+              }
+            )
+            (var-set latest-allocation-id allocation-id)
+            (ok allocation-id)
+          )
+        error ERR_TRANSFER_FAILED
+      )
+    )
+  )
+)
+
+
+
